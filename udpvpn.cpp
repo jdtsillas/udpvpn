@@ -7,28 +7,56 @@
 #include <iostream>
 #include <memory>
 #include <functional>
-#include <boost/ref.hpp>
+#include <boost/array.hpp>
 #include <boost/asio.hpp>
 
 #include <linux/if.h>
 #include <linux/if_tun.h>
 
-typedef std::function<void(boost::asio::streambuf&)> IoCompletion;
-
-class TunnelDev {
+class UdpVpnServer {
  public:
-  TunnelDev(boost::asio::io_service& io_service)
-      : tunfd_(io_service, tun_alloc("tun1", IFF_TUN)),
+  UdpVpnServer(boost::asio::io_service& io_service,
+               const boost::asio::ip::udp::endpoint& remote,
+               const boost::asio::ip::udp::endpoint& local)
+      : send_socket_(io_service, boost::asio::ip::udp::v4()),
+        remote_(remote),
+        receive_socket_(io_service, local),
+        tunfd_(io_service, tun_alloc("tun1", IFF_TUN)),
         tapfd_(io_service, tun_alloc("tap1", IFF_TAP)) { }
 
-  void Send(boost::asio::streambuf& buf) {
-  }
-  void Receive(IoCompletion completion) {
-  }
-  void Start(IoCompletion completion) {
+  void Start() {
+    tunfd_.async_read_some(
+        boost::asio::null_buffers(),
+        [this](const boost::system::error_code& error,
+               std::size_t bytes_transferred) {
+          std::size_t bytes_received = tunfd_.read_some(
+              boost::asio::buffer(tunnel_buffer_, bytes_transferred));
+
+          send_socket_.async_send_to(
+              boost::asio::buffer(tunnel_buffer_, bytes_received),
+              remote_,
+              [this](const boost::system::error_code& error,
+                     std::size_t bytes_transferred) {
+              });
+        });
+
+    receive_socket_.async_receive_from(
+        boost::asio::buffer(udp_buffer_, buf_max_len),
+        from_endpoint_,
+        [this](const boost::system::error_code& error,
+               std::size_t bytes_transferred) {
+          tapfd_.async_write_some(
+              boost::asio::null_buffers(),
+              [this](const boost::system::error_code& error,
+                     std::size_t bytes_transferred) {
+                std::size_t bytes_sent = tapfd_.write_some(
+                    boost::asio::buffer(udp_buffer_, bytes_transferred));
+              });
+        });
   }
 
  private:
+
   int tun_alloc(std::string dev, int flags) {
     struct ifreq ifr;
     int fd, err;
@@ -55,41 +83,17 @@ class TunnelDev {
     return fd;
   }
 
-  boost::asio::posix::stream_descriptor tunfd_;
-  boost::asio::posix::stream_descriptor tapfd_;
-};
+  static constexpr int buf_max_len = 1600;
+  boost::array<char, buf_max_len> tunnel_buffer_;
+  boost::array<char, buf_max_len> udp_buffer_;
 
-class UdpVpnServer {
- public:
-  UdpVpnServer(boost::asio::io_service& io_service,
-               const boost::asio::ip::udp::endpoint& remote,
-               const boost::asio::ip::udp::endpoint& local)
-      : send_socket_(io_service, boost::asio::ip::udp::v4()),
-        remote_(remote),
-        receive_socket_(io_service, local),
-        tunnel_dev_(io_service) { }
-  
-  void Send(boost::asio::streambuf& buf) {
-  }
-  void Receive(IoCompletion completion) {
-  }
-  void Start() {
-    tunnel_dev_.Start(
-        [this](boost::asio::streambuf& buf) {
-          Send(buf);
-        });
-    Receive(
-        [this](boost::asio::streambuf& buf) {
-          tunnel_dev_.Send(buf);
-        });
-  }
-
- private:
   boost::asio::ip::udp::socket send_socket_;
   boost::asio::ip::udp::endpoint remote_;
   boost::asio::ip::udp::socket receive_socket_;
+  boost::asio::ip::udp::endpoint from_endpoint_;
 
-  TunnelDev tunnel_dev_;
+  boost::asio::posix::stream_descriptor tunfd_;
+  boost::asio::posix::stream_descriptor tapfd_;
 };
 
 int main(int argc, char **argv) {
