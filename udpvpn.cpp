@@ -21,25 +21,37 @@ class UdpVpnServer {
       : send_socket_(io_service, boost::asio::ip::udp::v4()),
         remote_(remote),
         receive_socket_(io_service, local),
-        tunfd_(io_service, tun_alloc("tun1", IFF_TUN)),
         tapfd_(io_service, tun_alloc("tap1", IFF_TAP)) { }
 
   void Start() {
-    tunfd_.async_read_some(
+    TapReceive();
+    UdpReceive();
+  }
+
+  void TapReceive() {
+    tapfd_.async_read_some(
         boost::asio::null_buffers(),
         [this](const boost::system::error_code& error,
                std::size_t bytes_transferred) {
-          std::size_t bytes_received = tunfd_.read_some(
+          std::size_t bytes_received = tapfd_.read_some(
               boost::asio::buffer(tunnel_buffer_, bytes_transferred));
-
-          send_socket_.async_send_to(
-              boost::asio::buffer(tunnel_buffer_, bytes_received),
-              remote_,
-              [this](const boost::system::error_code& error,
-                     std::size_t bytes_transferred) {
-              });
+          std::cout << "Read " << bytes_transferred <<
+              " from tunfd: " << error << "\n";
+          if (bytes_received) {
+            send_socket_.async_send_to(
+                boost::asio::buffer(tunnel_buffer_, bytes_received),
+                remote_,
+                [this](const boost::system::error_code& error,
+                       std::size_t bytes_transferred) {
+                  std::cout << "Wrote " << bytes_transferred <<
+                      "to udp: " << error << "\n";
+                  TapReceive();
+                });
+          }
         });
-
+  }
+  
+  void UdpReceive() {
     receive_socket_.async_receive_from(
         boost::asio::buffer(udp_buffer_, buf_max_len),
         from_endpoint_,
@@ -51,7 +63,9 @@ class UdpVpnServer {
                      std::size_t bytes_transferred) {
                 std::size_t bytes_sent = tapfd_.write_some(
                     boost::asio::buffer(udp_buffer_, bytes_transferred));
+                std::cout << "Write " << bytes_sent << " to tapfd\n";
               });
+          UdpReceive();
         });
   }
 
@@ -92,7 +106,6 @@ class UdpVpnServer {
   boost::asio::ip::udp::socket receive_socket_;
   boost::asio::ip::udp::endpoint from_endpoint_;
 
-  boost::asio::posix::stream_descriptor tunfd_;
   boost::asio::posix::stream_descriptor tapfd_;
 };
 
