@@ -30,16 +30,14 @@ class UdpVpnServer {
 
   void TapReceive() {
     tapfd_.async_read_some(
-        boost::asio::null_buffers(),
+        boost::asio::buffer(tunnel_buffer_, buf_max_len),
         [this](const boost::system::error_code& error,
                std::size_t bytes_transferred) {
-          std::size_t bytes_received = tapfd_.read_some(
-              boost::asio::buffer(tunnel_buffer_, bytes_transferred));
           std::cout << "Read " << bytes_transferred <<
               " from tunfd: " << error << "\n";
-          if (bytes_received) {
+          if (bytes_transferred) {
             send_socket_.async_send_to(
-                boost::asio::buffer(tunnel_buffer_, bytes_received),
+                boost::asio::buffer(tunnel_buffer_, bytes_transferred),
                 remote_,
                 [this](const boost::system::error_code& error,
                        std::size_t bytes_transferred) {
@@ -78,7 +76,7 @@ class UdpVpnServer {
     
     strncpy(name, dev.c_str(), IFNAMSIZ);
     
-    if ((fd = open("/dev/net/tun", O_RDWR)) < 0 ) {
+    if ((fd = open("/dev/net/tun", O_RDWR | O_NONBLOCK)) < 0 ) {
       perror("Opening /dev/net/tun");
       return fd;
     }
@@ -91,7 +89,7 @@ class UdpVpnServer {
       close(fd);
       return err;
     }
-    
+
     strcpy(name, ifr.ifr_name);
     std::cout << "Allocated " << name << " for " << dev << "\n";
     return fd;
