@@ -20,7 +20,7 @@ g++ udpvpn.cpp -lboost_system -pthread -lboost_program_options -lcrypto
 ## Optional Features
 
 Option              | Description
-=================== | ==========
+------------------- | -----------
 --tunnel=name       | Use "name" for the device when creating or binding to a tunnel.
 --key=key_file_path | Use "key_file_path" to load a private symmetric key for encryption. The file will contain a 256 bit key and a 128 bit initial vector. The same key file would be used on all connected endpoints. The file should be generated using openssl.
 
