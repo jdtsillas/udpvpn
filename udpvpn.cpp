@@ -19,16 +19,33 @@
 #include <linux/if.h>
 #include <linux/if_tun.h>
 
+static constexpr int symmetric_key_len = 256 / 8;
+static constexpr int symmetric_iv_len = 128 / 8;
+
+EVP_CIPHER_CTX *crypt_init(const char *key, const char *iv);
+int encrypt(EVP_CIPHER_CTX *ctx, const char *plaintext,
+            int plaintext_len, char *ciphertext);
+int decrypt(EVP_CIPHER_CTX *ctx, const char *ciphertext,
+            int ciphertext_len, char *plaintext);
+
 class UdpVpnServer {
  public:
   UdpVpnServer(boost::asio::io_service& io_service,
                const boost::asio::ip::udp::endpoint& remote,
                const boost::asio::ip::udp::endpoint& local,
-               const std::string& tunnel)
+               const std::string& tunnel,
+               const char* key, const char* iv)
       : send_socket_(io_service, boost::asio::ip::udp::v4()),
         remote_(remote),
         receive_socket_(io_service, local),
-        tunfd_(io_service, tun_alloc(tunnel, IFF_TUN)) { }
+        tunfd_(io_service, tun_alloc(tunnel, IFF_TUN)),
+        crypt_ctx_(crypt_init(key, iv)) { }
+
+  ~UdpVpnServer() {
+    if (crypt_ctx_) {
+      EVP_CIPHER_CTX_free(crypt_ctx_);
+    }
+  }
 
   void Start() {
     if (tunfd_.is_open()) {
@@ -43,8 +60,17 @@ class UdpVpnServer {
         [this](const boost::system::error_code& error,
                std::size_t bytes_transferred) {
           if (bytes_transferred) {
+            boost::array<char, buf_max_len>* buffer_data;
+            if (crypt_ctx_) {
+              bytes_transferred = encrypt(
+                  crypt_ctx_, tunnel_buffer_.data(), bytes_transferred,
+                  encrypted_tunnel_buffer_.data());
+              buffer_data = &encrypted_tunnel_buffer_;
+            } else {
+              buffer_data = &tunnel_buffer_;
+            }
             send_socket_.async_send_to(
-                boost::asio::buffer(tunnel_buffer_, bytes_transferred),
+                boost::asio::buffer(*buffer_data, bytes_transferred),
                 remote_,
                 [this](const boost::system::error_code& error,
                        std::size_t bytes_transferred) {
@@ -62,8 +88,17 @@ class UdpVpnServer {
         [this](const boost::system::error_code& error,
                std::size_t bytes_transferred) {
           if (bytes_transferred) {
+            boost::array<char, buf_max_len>* buffer_data;
+            if (crypt_ctx_) {
+              bytes_transferred = decrypt(
+                  crypt_ctx_, udp_buffer_.data(), bytes_transferred,
+                  plaintext_udp_buffer_.data());
+              buffer_data = &plaintext_udp_buffer_;
+            } else {
+              buffer_data = &udp_buffer_;
+            }
             tunfd_.async_write_some(
-                boost::asio::buffer(udp_buffer_, bytes_transferred),
+                boost::asio::buffer(*buffer_data, bytes_transferred),
                 [this](const boost::system::error_code& error,
                        std::size_t bytes_transferred) {
                   //std::cout << "Sent Tunnel " << bytes_transferred << " bytes: " << error << "\n";
@@ -108,7 +143,9 @@ class UdpVpnServer {
 
   static constexpr int buf_max_len = 1600;
   boost::array<char, buf_max_len> tunnel_buffer_;
+  boost::array<char, buf_max_len> encrypted_tunnel_buffer_;
   boost::array<char, buf_max_len> udp_buffer_;
+  boost::array<char, buf_max_len> plaintext_udp_buffer_;
 
   boost::asio::ip::udp::socket send_socket_;
   boost::asio::ip::udp::endpoint remote_;
@@ -116,9 +153,88 @@ class UdpVpnServer {
   boost::asio::ip::udp::endpoint from_endpoint_;
 
   boost::asio::posix::stream_descriptor tunfd_;
+  EVP_CIPHER_CTX *crypt_ctx_;
 };
 
 namespace po = boost::program_options;
+
+EVP_CIPHER_CTX *crypt_init(const char *key, const char *iv) {
+  EVP_CIPHER_CTX *ctx;
+
+  if (key == nullptr || iv == nullptr) {
+    return nullptr;
+  }
+
+  /* Create and initialise the context */
+  if (!(ctx = EVP_CIPHER_CTX_new()))
+    return nullptr;
+
+  /*
+   * Initialise the encryption operation. IMPORTANT - ensure you use a key
+   * and IV size appropriate for your cipher
+   * In this example we are using 256 bit AES (i.e. a 256 bit key). The
+   * IV size for *most* modes is the same as the block size. For AES this
+   * is 128 bits
+   */
+  if (1 != EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL,
+                              (const unsigned char*)key,
+                              (const unsigned char*)iv))
+    return nullptr;
+
+  return ctx;
+}
+
+int encrypt(EVP_CIPHER_CTX *ctx, const char *plaintext,
+            int plaintext_len, char *ciphertext)
+{
+  int len;
+  int ciphertext_len;
+
+  /*
+   * Provide the message to be encrypted, and obtain the encrypted output.
+   * EVP_EncryptUpdate can be called multiple times if necessary
+   */
+  if (1 != EVP_EncryptUpdate(ctx, (unsigned char*)ciphertext,
+                             &len, (const unsigned char*)plaintext, plaintext_len))
+    return -1;
+  ciphertext_len = len;
+
+  /*
+   * Finalise the encryption. Further ciphertext bytes may be written at
+   * this stage.
+   */
+  if (1 != EVP_EncryptFinal_ex(ctx, (unsigned char*)ciphertext + len, &len))
+    return -1;
+  ciphertext_len += len;
+
+  return ciphertext_len;
+}
+
+int decrypt(EVP_CIPHER_CTX *ctx, const char *ciphertext,
+            int ciphertext_len, char *plaintext)
+{
+  int len;
+  int plaintext_len;
+
+  /*
+   * Provide the message to be decrypted, and obtain the plaintext output.
+   * EVP_DecryptUpdate can be called multiple times if necessary.
+   */
+  if (1 != EVP_DecryptUpdate(ctx, (unsigned char*)plaintext, &len,
+                             (const unsigned char*)ciphertext, ciphertext_len))
+    return -1;
+  plaintext_len = len;
+
+  /*
+   * Finalise the decryption. Further plaintext bytes may be written at
+   * this stage.
+   */
+  if (1 != EVP_DecryptFinal_ex(ctx, (unsigned char*)plaintext + len, &len))
+    return -1;
+  plaintext_len += len;
+
+  return plaintext_len;
+}
 
 bool decompose_ip_port(const std::string endpoint, std::string& ip, int& port) {
   int cpos = endpoint.find_first_of(':');
@@ -132,9 +248,6 @@ bool decompose_ip_port(const std::string endpoint, std::string& ip, int& port) {
   } catch (...) { return false; }
   return true;
 }
-
-static constexpr int symmetric_key_len = 256 / 8;
-static constexpr int symmetric_iv_len = 128 / 8;
 
 bool load_encryption_data(const std::string& key_file_path,
                           char* symmetric_key,
@@ -222,7 +335,9 @@ int main(int argc, char **argv) {
       boost::asio::ip::address::from_string(local_ip), local_port);
 
   try {
-    UdpVpnServer udp_server(io_service, remote, local, tunnel_device);
+    UdpVpnServer udp_server(io_service, remote, local, tunnel_device,
+                            !key_file_path.empty() ? symmetric_key : nullptr,
+                            !key_file_path.empty() ? symmetric_iv : nullptr);
     udp_server.Start();
     io_service.run();
   } catch (const boost::exception& ex) {

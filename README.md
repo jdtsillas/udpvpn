@@ -14,7 +14,7 @@ Tunnel: tun1
 To build on Linux:
 
 ```
-g++ udpvpn.cpp -lboost_system -pthread -lboost_program_options -lssl
+g++ udpvpn.cpp -lboost_system -pthread -lboost_program_options -lcrypto
 ```
 
 ## Optional Features
