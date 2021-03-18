@@ -22,11 +22,11 @@
 static constexpr int symmetric_key_len = 256 / 8;
 static constexpr int symmetric_iv_len = 128 / 8;
 
-EVP_CIPHER_CTX *crypt_init(const char *key, const char *iv);
-int encrypt(EVP_CIPHER_CTX *ctx, const char *plaintext,
-            int plaintext_len, char *ciphertext);
-int decrypt(EVP_CIPHER_CTX *ctx, const char *ciphertext,
-            int ciphertext_len, char *plaintext);
+EVP_CIPHER_CTX *crypt_init(const unsigned char *key, const unsigned char *iv);
+int encrypt(EVP_CIPHER_CTX *ctx, const unsigned char *plaintext,
+            int plaintext_len, unsigned char *ciphertext);
+int decrypt(EVP_CIPHER_CTX *ctx, const unsigned char *ciphertext,
+            int ciphertext_len, unsigned char *plaintext);
 
 class UdpVpnServer {
  public:
@@ -34,7 +34,7 @@ class UdpVpnServer {
                const boost::asio::ip::udp::endpoint& remote,
                const boost::asio::ip::udp::endpoint& local,
                const std::string& tunnel,
-               const char* key, const char* iv)
+               const unsigned char* key, const unsigned char* iv)
       : send_socket_(io_service, boost::asio::ip::udp::v4()),
         remote_(remote),
         receive_socket_(io_service, local),
@@ -60,7 +60,7 @@ class UdpVpnServer {
         [this](const boost::system::error_code& error,
                std::size_t bytes_transferred) {
           if (bytes_transferred) {
-            boost::array<char, buf_max_len>* buffer_data;
+            boost::array<unsigned char, buf_max_len>* buffer_data;
             if (crypt_ctx_) {
               bytes_transferred = encrypt(
                   crypt_ctx_, tunnel_buffer_.data(), bytes_transferred,
@@ -88,7 +88,7 @@ class UdpVpnServer {
         [this](const boost::system::error_code& error,
                std::size_t bytes_transferred) {
           if (bytes_transferred) {
-            boost::array<char, buf_max_len>* buffer_data;
+            boost::array<unsigned char, buf_max_len>* buffer_data;
             if (crypt_ctx_) {
               bytes_transferred = decrypt(
                   crypt_ctx_, udp_buffer_.data(), bytes_transferred,
@@ -142,10 +142,10 @@ class UdpVpnServer {
   }
 
   static constexpr int buf_max_len = 1600;
-  boost::array<char, buf_max_len> tunnel_buffer_;
-  boost::array<char, buf_max_len> encrypted_tunnel_buffer_;
-  boost::array<char, buf_max_len> udp_buffer_;
-  boost::array<char, buf_max_len> plaintext_udp_buffer_;
+  boost::array<unsigned char, buf_max_len> tunnel_buffer_;
+  boost::array<unsigned char, buf_max_len> encrypted_tunnel_buffer_;
+  boost::array<unsigned char, buf_max_len> udp_buffer_;
+  boost::array<unsigned char, buf_max_len> plaintext_udp_buffer_;
 
   boost::asio::ip::udp::socket send_socket_;
   boost::asio::ip::udp::endpoint remote_;
@@ -158,7 +158,7 @@ class UdpVpnServer {
 
 namespace po = boost::program_options;
 
-EVP_CIPHER_CTX *crypt_init(const char *key, const char *iv) {
+EVP_CIPHER_CTX *crypt_init(const unsigned char *key, const unsigned char *iv) {
   EVP_CIPHER_CTX *ctx;
 
   if (key == nullptr || iv == nullptr) {
@@ -176,16 +176,14 @@ EVP_CIPHER_CTX *crypt_init(const char *key, const char *iv) {
    * IV size for *most* modes is the same as the block size. For AES this
    * is 128 bits
    */
-  if (1 != EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL,
-                              (const unsigned char*)key,
-                              (const unsigned char*)iv))
+  if (1 != EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key, iv))
     return nullptr;
 
   return ctx;
 }
 
-int encrypt(EVP_CIPHER_CTX *ctx, const char *plaintext,
-            int plaintext_len, char *ciphertext)
+int encrypt(EVP_CIPHER_CTX *ctx, const unsigned char *plaintext,
+            int plaintext_len, unsigned char *ciphertext)
 {
   int len;
   int ciphertext_len;
@@ -194,8 +192,7 @@ int encrypt(EVP_CIPHER_CTX *ctx, const char *plaintext,
    * Provide the message to be encrypted, and obtain the encrypted output.
    * EVP_EncryptUpdate can be called multiple times if necessary
    */
-  if (1 != EVP_EncryptUpdate(ctx, (unsigned char*)ciphertext,
-                             &len, (const unsigned char*)plaintext, plaintext_len))
+  if (1 != EVP_EncryptUpdate(ctx, ciphertext, &len, plaintext, plaintext_len))
     return -1;
   ciphertext_len = len;
 
@@ -203,15 +200,15 @@ int encrypt(EVP_CIPHER_CTX *ctx, const char *plaintext,
    * Finalise the encryption. Further ciphertext bytes may be written at
    * this stage.
    */
-  if (1 != EVP_EncryptFinal_ex(ctx, (unsigned char*)ciphertext + len, &len))
+  if (1 != EVP_EncryptFinal_ex(ctx, ciphertext + len, &len))
     return -1;
   ciphertext_len += len;
 
   return ciphertext_len;
 }
 
-int decrypt(EVP_CIPHER_CTX *ctx, const char *ciphertext,
-            int ciphertext_len, char *plaintext)
+int decrypt(EVP_CIPHER_CTX *ctx, const unsigned char *ciphertext,
+            int ciphertext_len, unsigned char *plaintext)
 {
   int len;
   int plaintext_len;
@@ -220,8 +217,7 @@ int decrypt(EVP_CIPHER_CTX *ctx, const char *ciphertext,
    * Provide the message to be decrypted, and obtain the plaintext output.
    * EVP_DecryptUpdate can be called multiple times if necessary.
    */
-  if (1 != EVP_DecryptUpdate(ctx, (unsigned char*)plaintext, &len,
-                             (const unsigned char*)ciphertext, ciphertext_len))
+  if (1 != EVP_DecryptUpdate(ctx, plaintext, &len, ciphertext, ciphertext_len))
     return -1;
   plaintext_len = len;
 
@@ -229,7 +225,7 @@ int decrypt(EVP_CIPHER_CTX *ctx, const char *ciphertext,
    * Finalise the decryption. Further plaintext bytes may be written at
    * this stage.
    */
-  if (1 != EVP_DecryptFinal_ex(ctx, (unsigned char*)plaintext + len, &len))
+  if (1 != EVP_DecryptFinal_ex(ctx, plaintext + len, &len))
     return -1;
   plaintext_len += len;
 
@@ -250,15 +246,15 @@ bool decompose_ip_port(const std::string endpoint, std::string& ip, int& port) {
 }
 
 bool load_encryption_data(const std::string& key_file_path,
-                          char* symmetric_key,
-                          char* symmetric_iv) {
+                          unsigned char* symmetric_key,
+                          unsigned char* symmetric_iv) {
   std::ifstream key_file(key_file_path, std::ifstream::binary);
 
-  key_file.read(symmetric_key, symmetric_key_len);
+  key_file.read((char*)symmetric_key, symmetric_key_len);
   if (key_file.gcount() != symmetric_key_len) {
     return false;
   }
-  key_file.read(symmetric_iv, symmetric_iv_len);
+  key_file.read((char*)symmetric_iv, symmetric_iv_len);
   if (key_file.gcount() != symmetric_iv_len) {
     return false;
   }
@@ -302,8 +298,8 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  char symmetric_key[symmetric_key_len];
-  char symmetric_iv[symmetric_iv_len];
+  unsigned char symmetric_key[symmetric_key_len];
+  unsigned char symmetric_iv[symmetric_iv_len];
 
   if (!key_file_path.empty()) {
     if (!load_encryption_data(key_file_path, symmetric_key, symmetric_iv)) {
