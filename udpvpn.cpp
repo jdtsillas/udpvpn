@@ -19,6 +19,7 @@
 #include <linux/if.h>
 #include <linux/if_tun.h>
 
+// 256 bit key and 128 bit initial vector
 static constexpr int symmetric_key_len = 256 / 8;
 static constexpr int symmetric_iv_len = 128 / 8;
 
@@ -156,8 +157,6 @@ class UdpVpnServer {
   EVP_CIPHER_CTX *crypt_ctx_;
 };
 
-namespace po = boost::program_options;
-
 EVP_CIPHER_CTX *crypt_init(const unsigned char *key, const unsigned char *iv) {
   EVP_CIPHER_CTX *ctx;
 
@@ -262,6 +261,8 @@ bool load_encryption_data(const std::string& key_file_path,
   std::cout << "Loaded key data\n";
   return true;
 }
+
+namespace po = boost::program_options;
 
 int main(int argc, char **argv) {
   std::string endpoint_local;
