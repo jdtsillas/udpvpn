@@ -157,6 +157,12 @@ class UdpVpnServer {
   EVP_CIPHER_CTX *crypt_ctx_;
 };
 
+struct CryptoException : std::exception {
+  char const* what() const throw() {
+    return "CryptoException";
+  }
+};
+
 EVP_CIPHER_CTX *crypt_init(const unsigned char *key, const unsigned char *iv) {
   EVP_CIPHER_CTX *ctx;
 
@@ -166,7 +172,7 @@ EVP_CIPHER_CTX *crypt_init(const unsigned char *key, const unsigned char *iv) {
 
   /* Create and initialise the context */
   if (!(ctx = EVP_CIPHER_CTX_new()))
-    return nullptr;
+    throw CryptoException();
 
   /*
    * Initialise the encryption operation. IMPORTANT - ensure you use a key
@@ -176,7 +182,7 @@ EVP_CIPHER_CTX *crypt_init(const unsigned char *key, const unsigned char *iv) {
    * is 128 bits
    */
   if (1 != EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key, iv))
-    return nullptr;
+    throw CryptoException();
 
   return ctx;
 }
@@ -192,7 +198,7 @@ int encrypt(EVP_CIPHER_CTX *ctx, const unsigned char *plaintext,
    * EVP_EncryptUpdate can be called multiple times if necessary
    */
   if (1 != EVP_EncryptUpdate(ctx, ciphertext, &len, plaintext, plaintext_len))
-    return -1;
+    throw CryptoException();
   ciphertext_len = len;
 
   /*
@@ -200,7 +206,7 @@ int encrypt(EVP_CIPHER_CTX *ctx, const unsigned char *plaintext,
    * this stage.
    */
   if (1 != EVP_EncryptFinal_ex(ctx, ciphertext + len, &len))
-    return -1;
+    throw CryptoException();
   ciphertext_len += len;
 
   return ciphertext_len;
@@ -217,7 +223,7 @@ int decrypt(EVP_CIPHER_CTX *ctx, const unsigned char *ciphertext,
    * EVP_DecryptUpdate can be called multiple times if necessary.
    */
   if (1 != EVP_DecryptUpdate(ctx, plaintext, &len, ciphertext, ciphertext_len))
-    return -1;
+    throw CryptoException();
   plaintext_len = len;
 
   /*
@@ -225,7 +231,7 @@ int decrypt(EVP_CIPHER_CTX *ctx, const unsigned char *ciphertext,
    * this stage.
    */
   if (1 != EVP_DecryptFinal_ex(ctx, plaintext + len, &len))
-    return -1;
+    throw CryptoException();
   plaintext_len += len;
 
   return plaintext_len;
@@ -338,7 +344,7 @@ int main(int argc, char **argv) {
     udp_server.Start();
     io_service.run();
   } catch (const boost::exception& ex) {
-    std::cout << "Boost exception: " << diagnostic_information(ex) << "\n";
+    std::cout << "exception: " << diagnostic_information(ex) << "\n";
     exit(1);
   }
 }
