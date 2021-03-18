@@ -45,6 +45,7 @@ class UdpVpnServer {
                 remote_,
                 [this](const boost::system::error_code& error,
                        std::size_t bytes_transferred) {
+                  //std::cout << "Sent UDP " << bytes_transferred << " bytes: " << error << "\n";
                   TunReceive();
                 });
           }
@@ -57,14 +58,15 @@ class UdpVpnServer {
         from_endpoint_,
         [this](const boost::system::error_code& error,
                std::size_t bytes_transferred) {
-          tunfd_.async_write_some(
-              boost::asio::null_buffers(),
-              [this](const boost::system::error_code& error,
-                     std::size_t bytes_transferred) {
-                std::size_t bytes_sent = tunfd_.write_some(
-                    boost::asio::buffer(udp_buffer_, bytes_transferred));
-              });
-          UdpReceive();
+          if (bytes_transferred) {
+            tunfd_.async_write_some(
+                boost::asio::buffer(udp_buffer_, bytes_transferred),
+                [this](const boost::system::error_code& error,
+                       std::size_t bytes_transferred) {
+                  //std::cout << "Sent Tunnel " << bytes_transferred << " bytes: " << error << "\n";
+                  UdpReceive();
+                });
+          }
         });
   }
 
