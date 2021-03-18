@@ -5,6 +5,7 @@
 
 #include <string>
 #include <iostream>
+#include <fstream>
 #include <memory>
 #include <functional>
 #include <boost/array.hpp>
@@ -12,7 +13,9 @@
 #include <boost/program_options.hpp>
 #include <boost/exception/diagnostic_information.hpp> 
 #include <boost/exception_ptr.hpp>
-
+#include <openssl/conf.h>
+#include <openssl/evp.h>
+#include <openssl/err.h>
 #include <linux/if.h>
 #include <linux/if_tun.h>
 
@@ -130,13 +133,35 @@ bool decompose_ip_port(const std::string endpoint, std::string& ip, int& port) {
   return true;
 }
 
+static constexpr int symmetric_key_len = 256 / 8;
+static constexpr int symmetric_iv_len = 128 / 8;
+
+bool load_encryption_data(const std::string& key_file_path,
+                          char* symmetric_key,
+                          char* symmetric_iv) {
+  std::ifstream key_file(key_file_path, std::ifstream::binary);
+
+  key_file.read(symmetric_key, symmetric_key_len);
+  if (key_file.gcount() != symmetric_key_len) {
+    return false;
+  }
+  key_file.read(symmetric_iv, symmetric_iv_len);
+  if (key_file.gcount() != symmetric_iv_len) {
+    return false;
+  }
+
+  std::cout << "Loaded key data\n";
+  return true;
+}
+
 int main(int argc, char **argv) {
   std::string endpoint_local;
   std::string endpoint_remote;
   std::string tunnel_device;
+  std::string key_file_path;
   
   po::options_description description(
-      "A program to implement a simple cleartext VPN tunnel over UDP");
+      "A program to implement a simple VPN tunnel over UDP");
   description.add_options()
       ("help", "Display this help message")
       ("local", po::value<std::string>(&endpoint_local)->required(),
@@ -144,7 +169,9 @@ int main(int argc, char **argv) {
       ("remote", po::value<std::string>(&endpoint_remote)->required(),
        "(required) Remote IP Address and port number for UDP packets (IP:UDPPort)")
       ("tunnel", po::value<std::string>(&tunnel_device)->default_value("tun1"),
-       "Tunnel device name to use (default: tun1)");
+       "(optional) Tunnel device name to use (default: tun1)")
+      ("key", po::value<std::string>(&key_file_path),
+       "(optional) Key file to use for symmetric encryption (key file must contain a 256 bit binary key, followed by a 128 bit binary initial vector)");
   po::variables_map vm;
   
   po::store(
@@ -160,6 +187,16 @@ int main(int argc, char **argv) {
   if (vm.count("help")) {
     std::cout << description << "\n";
     return 1;
+  }
+
+  char symmetric_key[symmetric_key_len];
+  char symmetric_iv[symmetric_iv_len];
+
+  if (!key_file_path.empty()) {
+    if (!load_encryption_data(key_file_path, symmetric_key, symmetric_iv)) {
+      std::cout << "Unable to load key file from " << key_file_path << "\n";
+      return 1;
+    }
   }
 
   std::string remote_ip;

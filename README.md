@@ -1,6 +1,6 @@
 ### UDP VPN Tunnel
 
-A simple program which sets up a cleartext IP tunnel between two endpoints using UDP.
+A simple program which sets up a cleartext (or optionally encrypted) IP tunnel between endpoints using UDP.
 
 Example:
 
@@ -14,6 +14,16 @@ Tunnel: tun1
 To build on Linux:
 
 ```
-g++ udpvpn.cpp -lboost_system -pthread -lboost_program_options
+g++ udpvpn.cpp -lboost_system -pthread -lboost_program_options -lssl
 ```
 
+## Optional Features
+
+--tunnel=<name>        Use <name> for the device when creating or binding to a tunnel.
+--key=<key_file_path>  Use <key_file_path> to load a private symmetric key for encryption.
+                       This symmetric key file should be generated using openssl:
+
+                       #$ openssl rand 48 > sym_keyfile.key#
+
+                       The file will contain a 256 bit key and a 128 bit initial vector.
+                       The same key file would be used on all connected endpoints.
