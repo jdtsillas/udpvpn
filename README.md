@@ -25,7 +25,7 @@ g++ udpvpn.cpp -lboost_system -pthread -lboost_program_options -lcrypto
                        This symmetric key file should be generated using openssl:
 
 ```
-                       #$ openssl rand 48 > sym_keyfile.key#
+                       $ openssl rand 48 > sym_keyfile.key
 ```
 
                        The file will contain a 256 bit key and a 128 bit initial vector.
