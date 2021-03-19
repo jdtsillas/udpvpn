@@ -323,12 +323,12 @@ int main(int argc, char **argv) {
     po::notify(vm);
   } catch (...) {
     std::cout << description << "\n";
-    return 1;
+    exit(1);
   }
     
   if (vm.count("help")) {
     std::cout << description << "\n";
-    return 1;
+    exit(0);
   }
 
   unsigned char symmetric_key[symmetric_key_len];
@@ -337,7 +337,7 @@ int main(int argc, char **argv) {
   if (!key_file_path.empty()) {
     if (!load_encryption_data(key_file_path, symmetric_key, symmetric_iv)) {
       std::cout << "Unable to load key file from " << key_file_path << "\n";
-      return 1;
+      exit(1);
     }
   }
 
@@ -349,7 +349,7 @@ int main(int argc, char **argv) {
   if (!decompose_ip_port(endpoint_remote, remote_ip, remote_port) ||
       !decompose_ip_port(endpoint_local, local_ip, local_port)) {
     std::cout << "IP Address and port number must be in the form IP:UDPPort\n";
-    return 1;
+    exit(1);
   }
 
   std::cout << "Remote: " << remote_ip << ":" << remote_port << "\n";
@@ -373,4 +373,6 @@ int main(int argc, char **argv) {
     std::cout << "exception: " << diagnostic_information(ex) << "\n";
     exit(1);
   }
+  
+  exit(0);
 }
