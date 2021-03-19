@@ -23,12 +23,6 @@
 static constexpr int symmetric_key_len = 256 / 8;
 static constexpr int symmetric_iv_len = 128 / 8;
 
-EVP_CIPHER_CTX *crypt_init(const unsigned char *key, const unsigned char *iv);
-int encrypt(EVP_CIPHER_CTX *ctx, const unsigned char *plaintext,
-            int plaintext_len, unsigned char *ciphertext);
-int decrypt(EVP_CIPHER_CTX *ctx, const unsigned char *ciphertext,
-            int ciphertext_len, unsigned char *plaintext);
-
 class UdpVpnServer {
  public:
   UdpVpnServer(boost::asio::io_service& io_service,
@@ -40,11 +34,16 @@ class UdpVpnServer {
         remote_(remote),
         receive_socket_(io_service, local),
         tunfd_(io_service, tun_alloc(tunnel, IFF_TUN)),
-        crypt_ctx_(crypt_init(key, iv)) { }
+        key_(key), iv_(iv) {
+    crypt_init();
+  }
 
   ~UdpVpnServer() {
-    if (crypt_ctx_) {
-      EVP_CIPHER_CTX_free(crypt_ctx_);
+    if (rx_crypt_ctx_) {
+      EVP_CIPHER_CTX_free(rx_crypt_ctx_);
+    }
+    if (tx_crypt_ctx_) {
+      EVP_CIPHER_CTX_free(tx_crypt_ctx_);
     }
   }
 
@@ -61,10 +60,11 @@ class UdpVpnServer {
         [this](const boost::system::error_code& error,
                std::size_t bytes_transferred) {
           if (bytes_transferred) {
+            //std::cout << "Received Tunnel " << bytes_transferred << " bytes\n";
             boost::array<unsigned char, buf_max_len>* buffer_data;
-            if (crypt_ctx_) {
+            if (tx_crypt_ctx_) {
               bytes_transferred = encrypt(
-                  crypt_ctx_, tunnel_buffer_.data(), bytes_transferred,
+                  tx_crypt_ctx_, tunnel_buffer_.data(), bytes_transferred,
                   encrypted_tunnel_buffer_.data());
               buffer_data = &encrypted_tunnel_buffer_;
             } else {
@@ -90,9 +90,10 @@ class UdpVpnServer {
                std::size_t bytes_transferred) {
           if (bytes_transferred) {
             boost::array<unsigned char, buf_max_len>* buffer_data;
-            if (crypt_ctx_) {
+            //std::cout << "Received UDP " << bytes_transferred << " bytes\n";
+            if (rx_crypt_ctx_) {
               bytes_transferred = decrypt(
-                  crypt_ctx_, udp_buffer_.data(), bytes_transferred,
+                  rx_crypt_ctx_, udp_buffer_.data(), bytes_transferred,
                   plaintext_udp_buffer_.data());
               buffer_data = &plaintext_udp_buffer_;
             } else {
@@ -142,6 +143,107 @@ class UdpVpnServer {
     return fd;
   }
 
+  struct CryptoException : std::exception {
+    char const* what() const throw() {
+      return "CryptoException";
+    }
+  };
+
+  void crypt_init() {
+    if (key_ == nullptr || iv_ == nullptr) {
+      return;
+    }
+
+    /* Create and initialise the contexts */
+    if (!(rx_crypt_ctx_ = EVP_CIPHER_CTX_new()))
+      throw CryptoException();
+
+    if (!(tx_crypt_ctx_ = EVP_CIPHER_CTX_new()))
+      throw CryptoException();
+  }
+
+  int encrypt(EVP_CIPHER_CTX *ctx, const unsigned char *plaintext,
+              int plaintext_len, unsigned char *ciphertext)
+  {
+    int len;
+    int ciphertext_len;
+
+    /*
+     * Initialise the encryption operation. IMPORTANT - ensure you use a key
+     * and IV size appropriate for your cipher
+     * In this example we are using 256 bit AES (i.e. a 256 bit key). The
+     * IV size for *most* modes is the same as the block size. For AES this
+     * is 128 bits
+     */
+    if (1 != EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key_, iv_)) {
+      ERR_print_errors_fp(stderr);
+      throw CryptoException();
+    }
+
+    /*
+     * Provide the message to be encrypted, and obtain the encrypted output.
+     * EVP_EncryptUpdate can be called multiple times if necessary
+     */
+    if (1 != EVP_EncryptUpdate(ctx, ciphertext, &len, plaintext, plaintext_len)) {
+      ERR_print_errors_fp(stderr);
+      throw CryptoException();
+    }
+    ciphertext_len = len;
+
+    /*
+     * Finalise the encryption. Further ciphertext bytes may be written at
+     * this stage.
+     */
+    if (1 != EVP_EncryptFinal_ex(ctx, ciphertext + len, &len)) {
+      ERR_print_errors_fp(stderr);
+      throw CryptoException();
+    }
+    ciphertext_len += len;
+
+    return ciphertext_len;
+  }
+
+  int decrypt(EVP_CIPHER_CTX *ctx, const unsigned char *ciphertext,
+              int ciphertext_len, unsigned char *plaintext)
+  {
+    int len;
+    int plaintext_len;
+
+    /*
+     * Initialise the decryption operation. IMPORTANT - ensure you use a key
+     * and IV size appropriate for your cipher
+     * In this example we are using 256 bit AES (i.e. a 256 bit key). The
+     * IV size for *most* modes is the same as the block size. For AES this
+     * is 128 bits
+     */
+    if (1 != EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key_, iv_)) {
+      ERR_print_errors_fp(stderr);
+      throw CryptoException();
+    }
+
+    /*
+     * Provide the message to be decrypted, and obtain the plaintext output.
+     * EVP_DecryptUpdate can be called multiple times if necessary.
+     */
+    if (1 != EVP_DecryptUpdate(ctx, plaintext, &len, ciphertext, ciphertext_len)) {
+      ERR_print_errors_fp(stderr);
+      throw CryptoException();
+    }
+    plaintext_len = len;
+
+    /*
+     * Finalise the decryption. Further plaintext bytes may be written at
+     * this stage.
+     */
+    if (1 != EVP_DecryptFinal_ex(ctx, plaintext + len, &len)) {
+      ERR_print_errors_fp(stderr);
+      throw CryptoException();
+    }
+    plaintext_len += len;
+
+    return plaintext_len;
+  }
+
   static constexpr int buf_max_len = 1600;
   boost::array<unsigned char, buf_max_len> tunnel_buffer_;
   boost::array<unsigned char, buf_max_len> encrypted_tunnel_buffer_;
@@ -154,88 +256,12 @@ class UdpVpnServer {
   boost::asio::ip::udp::endpoint from_endpoint_;
 
   boost::asio::posix::stream_descriptor tunfd_;
-  EVP_CIPHER_CTX *crypt_ctx_;
+
+  const unsigned char *key_;
+  const unsigned char *iv_;
+  EVP_CIPHER_CTX *rx_crypt_ctx_ = nullptr;
+  EVP_CIPHER_CTX *tx_crypt_ctx_ = nullptr;
 };
-
-struct CryptoException : std::exception {
-  char const* what() const throw() {
-    return "CryptoException";
-  }
-};
-
-EVP_CIPHER_CTX *crypt_init(const unsigned char *key, const unsigned char *iv) {
-  EVP_CIPHER_CTX *ctx;
-
-  if (key == nullptr || iv == nullptr) {
-    return nullptr;
-  }
-
-  /* Create and initialise the context */
-  if (!(ctx = EVP_CIPHER_CTX_new()))
-    throw CryptoException();
-
-  /*
-   * Initialise the encryption operation. IMPORTANT - ensure you use a key
-   * and IV size appropriate for your cipher
-   * In this example we are using 256 bit AES (i.e. a 256 bit key). The
-   * IV size for *most* modes is the same as the block size. For AES this
-   * is 128 bits
-   */
-  if (1 != EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key, iv))
-    throw CryptoException();
-
-  return ctx;
-}
-
-int encrypt(EVP_CIPHER_CTX *ctx, const unsigned char *plaintext,
-            int plaintext_len, unsigned char *ciphertext)
-{
-  int len;
-  int ciphertext_len;
-
-  /*
-   * Provide the message to be encrypted, and obtain the encrypted output.
-   * EVP_EncryptUpdate can be called multiple times if necessary
-   */
-  if (1 != EVP_EncryptUpdate(ctx, ciphertext, &len, plaintext, plaintext_len))
-    throw CryptoException();
-  ciphertext_len = len;
-
-  /*
-   * Finalise the encryption. Further ciphertext bytes may be written at
-   * this stage.
-   */
-  if (1 != EVP_EncryptFinal_ex(ctx, ciphertext + len, &len))
-    throw CryptoException();
-  ciphertext_len += len;
-
-  return ciphertext_len;
-}
-
-int decrypt(EVP_CIPHER_CTX *ctx, const unsigned char *ciphertext,
-            int ciphertext_len, unsigned char *plaintext)
-{
-  int len;
-  int plaintext_len;
-
-  /*
-   * Provide the message to be decrypted, and obtain the plaintext output.
-   * EVP_DecryptUpdate can be called multiple times if necessary.
-   */
-  if (1 != EVP_DecryptUpdate(ctx, plaintext, &len, ciphertext, ciphertext_len))
-    throw CryptoException();
-  plaintext_len = len;
-
-  /*
-   * Finalise the decryption. Further plaintext bytes may be written at
-   * this stage.
-   */
-  if (1 != EVP_DecryptFinal_ex(ctx, plaintext + len, &len))
-    throw CryptoException();
-  plaintext_len += len;
-
-  return plaintext_len;
-}
 
 bool decompose_ip_port(const std::string endpoint, std::string& ip, int& port) {
   int cpos = endpoint.find_first_of(':');
