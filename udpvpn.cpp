@@ -16,12 +16,21 @@
 #include <openssl/conf.h>
 #include <openssl/evp.h>
 #include <openssl/err.h>
+#include <openssl/rand.h>
+#include <openssl/hmac.h>
 #include <linux/if.h>
 #include <linux/if_tun.h>
 
-// 256 bit key and 128 bit initial vector
+// 256 bit keys and 128 bit initial vector
 static constexpr int symmetric_key_len = 256 / 8;
 static constexpr int symmetric_iv_len = 128 / 8;
+static constexpr int signing_key_len = 256 / 8;
+static constexpr int signature_len = 256 / 8;
+
+// When used with encryption the payload consists of
+// 256-bit SHA-256 HMAC signature followed by a random
+// 128-bit initial vector (used by the AES-CBC encryption)
+// followed by an encrypted payload.
 
 class UdpVpnServer {
  public:
@@ -29,12 +38,13 @@ class UdpVpnServer {
                const boost::asio::ip::udp::endpoint& remote,
                const boost::asio::ip::udp::endpoint& local,
                const std::string& tunnel,
-               const unsigned char* key, const unsigned char* iv)
+               const unsigned char* encryption_key,
+               const unsigned char* signing_key)
       : send_socket_(io_service, boost::asio::ip::udp::v4()),
         remote_(remote),
         receive_socket_(io_service, local),
         tunfd_(io_service, tun_alloc(tunnel, IFF_TUN)),
-        key_(key), iv_(iv) {
+        encryption_key_(encryption_key), signing_key_(signing_key) {
     crypt_init();
   }
 
@@ -44,6 +54,9 @@ class UdpVpnServer {
     }
     if (tx_crypt_ctx_) {
       EVP_CIPHER_CTX_free(tx_crypt_ctx_);
+    }
+    if (hmac_ctx_) {
+      HMAC_CTX_free(hmac_ctx_);
     }
   }
 
@@ -61,12 +74,25 @@ class UdpVpnServer {
                std::size_t bytes_transferred) {
           if (bytes_transferred) {
             //std::cout << "Received Tunnel " << bytes_transferred << " bytes\n";
-            boost::array<unsigned char, buf_max_len>* buffer_data;
+            std::array<unsigned char, buf_max_len>* buffer_data;
             if (tx_crypt_ctx_) {
+              // Generate a random initial vector
+              if (RAND_bytes(encrypted_tunnel_buffer_.data() +
+                             signature_len, symmetric_iv_len) != 1) {
+                ERR_print_errors_fp(stderr);
+                throw CryptoException();
+              }
               bytes_transferred = encrypt(
-                  tx_crypt_ctx_, tunnel_buffer_.data(), bytes_transferred,
-                  encrypted_tunnel_buffer_.data());
+                  tx_crypt_ctx_, tunnel_buffer_.data() + signature_len,
+                  tunnel_buffer_.data() + signature_len + symmetric_iv_len,
+                  bytes_transferred, encrypted_tunnel_buffer_.data());
+              // Generate a signature
+              sign_data(tunnel_buffer_.data(),
+                        tunnel_buffer_.data() + signature_len + symmetric_iv_len,
+                        bytes_transferred);
+              // Replace with the complete buffer
               buffer_data = &encrypted_tunnel_buffer_;
+              bytes_transferred += signature_len + symmetric_iv_len;
             } else {
               buffer_data = &tunnel_buffer_;
             }
@@ -89,12 +115,21 @@ class UdpVpnServer {
         [this](const boost::system::error_code& error,
                std::size_t bytes_transferred) {
           if (bytes_transferred) {
-            boost::array<unsigned char, buf_max_len>* buffer_data;
+            std::array<unsigned char, buf_max_len>* buffer_data;
             //std::cout << "Received UDP " << bytes_transferred << " bytes\n";
             if (rx_crypt_ctx_) {
+              bytes_transferred = bytes_transferred - signature_len + symmetric_iv_len;
+              if (!check_signature(
+                      udp_buffer_.data(),
+                      udp_buffer_.data() + signature_len + symmetric_iv_len,
+                      bytes_transferred)) {
+                // Failed the signature check - drop the data
+                return;
+              }
               bytes_transferred = decrypt(
-                  rx_crypt_ctx_, udp_buffer_.data(), bytes_transferred,
-                  plaintext_udp_buffer_.data());
+                  rx_crypt_ctx_, udp_buffer_.data() + signature_len,
+                  udp_buffer_.data() + signature_len + symmetric_iv_len,
+                  bytes_transferred, plaintext_udp_buffer_.data());
               buffer_data = &plaintext_udp_buffer_;
             } else {
               buffer_data = &udp_buffer_;
@@ -150,7 +185,7 @@ class UdpVpnServer {
   };
 
   void crypt_init() {
-    if (key_ == nullptr || iv_ == nullptr) {
+    if (encryption_key_ == nullptr || signing_key_ == nullptr) {
       return;
     }
 
@@ -160,9 +195,32 @@ class UdpVpnServer {
 
     if (!(tx_crypt_ctx_ = EVP_CIPHER_CTX_new()))
       throw CryptoException();
+
+    if (!(hmac_ctx_ = HMAC_CTX_new()))
+      throw CryptoException();
   }
 
-  int encrypt(EVP_CIPHER_CTX *ctx, const unsigned char *plaintext,
+  void sign_data(unsigned char* destination,
+                 unsigned char* source,
+                 int length) {
+    HMAC_Init_ex(hmac_ctx_, signing_key_, signing_key_len, EVP_sha256(), NULL);
+    HMAC_Update(hmac_ctx_, source, length);
+    unsigned int len = signature_len;
+    HMAC_Final(hmac_ctx_, destination, &len);
+  }
+
+  bool check_signature(unsigned char* data_signature,
+                       unsigned char* source,
+                       int length) {
+    unsigned char signature[signature_len];
+
+    sign_data(signature, source, length);
+
+    return CRYPTO_memcmp(data_signature, signature, signature_len) == 0;
+  }
+
+  int encrypt(EVP_CIPHER_CTX *ctx, unsigned char *iv,
+              const unsigned char *plaintext,
               int plaintext_len, unsigned char *ciphertext)
   {
     int len;
@@ -175,7 +233,7 @@ class UdpVpnServer {
      * IV size for *most* modes is the same as the block size. For AES this
      * is 128 bits
      */
-    if (1 != EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key_, iv_)) {
+    if (1 != EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, encryption_key_, iv)) {
       ERR_print_errors_fp(stderr);
       throw CryptoException();
     }
@@ -203,7 +261,8 @@ class UdpVpnServer {
     return ciphertext_len;
   }
 
-  int decrypt(EVP_CIPHER_CTX *ctx, const unsigned char *ciphertext,
+  int decrypt(EVP_CIPHER_CTX *ctx, unsigned char *iv,
+              const unsigned char *ciphertext,
               int ciphertext_len, unsigned char *plaintext)
   {
     int len;
@@ -216,7 +275,7 @@ class UdpVpnServer {
      * IV size for *most* modes is the same as the block size. For AES this
      * is 128 bits
      */
-    if (1 != EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key_, iv_)) {
+    if (1 != EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, encryption_key_, iv)) {
       ERR_print_errors_fp(stderr);
       throw CryptoException();
     }
@@ -245,10 +304,10 @@ class UdpVpnServer {
   }
 
   static constexpr int buf_max_len = 1600;
-  boost::array<unsigned char, buf_max_len> tunnel_buffer_;
-  boost::array<unsigned char, buf_max_len> encrypted_tunnel_buffer_;
-  boost::array<unsigned char, buf_max_len> udp_buffer_;
-  boost::array<unsigned char, buf_max_len> plaintext_udp_buffer_;
+  std::array<unsigned char, buf_max_len> tunnel_buffer_;
+  std::array<unsigned char, buf_max_len> encrypted_tunnel_buffer_;
+  std::array<unsigned char, buf_max_len> udp_buffer_;
+  std::array<unsigned char, buf_max_len> plaintext_udp_buffer_;
 
   boost::asio::ip::udp::socket send_socket_;
   boost::asio::ip::udp::endpoint remote_;
@@ -257,8 +316,9 @@ class UdpVpnServer {
 
   boost::asio::posix::stream_descriptor tunfd_;
 
-  const unsigned char *key_;
-  const unsigned char *iv_;
+  const unsigned char *encryption_key_;
+  const unsigned char *signing_key_;
+  HMAC_CTX *hmac_ctx_ = nullptr;
   EVP_CIPHER_CTX *rx_crypt_ctx_ = nullptr;
   EVP_CIPHER_CTX *tx_crypt_ctx_ = nullptr;
 };
@@ -278,15 +338,15 @@ bool decompose_ip_port(const std::string endpoint, std::string& ip, int& port) {
 
 bool load_encryption_data(const std::string& key_file_path,
                           unsigned char* symmetric_key,
-                          unsigned char* symmetric_iv) {
+                          unsigned char* signing_key) {
   std::ifstream key_file(key_file_path, std::ifstream::binary);
 
   key_file.read((char*)symmetric_key, symmetric_key_len);
   if (key_file.gcount() != symmetric_key_len) {
     return false;
   }
-  key_file.read((char*)symmetric_iv, symmetric_iv_len);
-  if (key_file.gcount() != symmetric_iv_len) {
+  key_file.read((char*)signing_key, signing_key_len);
+  if (key_file.gcount() != signing_key_len) {
     return false;
   }
 
@@ -332,10 +392,10 @@ int main(int argc, char **argv) {
   }
 
   unsigned char symmetric_key[symmetric_key_len];
-  unsigned char symmetric_iv[symmetric_iv_len];
+  unsigned char signing_key[signing_key_len];
 
   if (!key_file_path.empty()) {
-    if (!load_encryption_data(key_file_path, symmetric_key, symmetric_iv)) {
+    if (!load_encryption_data(key_file_path, symmetric_key, signing_key)) {
       std::cout << "Unable to load key file from " << key_file_path << "\n";
       exit(1);
     }
@@ -366,7 +426,7 @@ int main(int argc, char **argv) {
   try {
     UdpVpnServer udp_server(io_service, remote, local, tunnel_device,
                             !key_file_path.empty() ? symmetric_key : nullptr,
-                            !key_file_path.empty() ? symmetric_iv : nullptr);
+                            !key_file_path.empty() ? signing_key : nullptr);
     udp_server.Start();
     io_service.run();
   } catch (const boost::exception& ex) {
