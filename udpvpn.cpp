@@ -31,6 +31,13 @@ static constexpr int signature_len = 256 / 8;
 // 256-bit SHA-256 HMAC signature followed by a random
 // 128-bit initial vector (used by the AES-CBC encryption)
 // followed by an encrypted payload.
+#pragma pack(push, 1)
+struct UdpVpnEncryptedData {
+  unsigned char signature[signature_len];
+  unsigned char initial_vector[symmetric_iv_len];
+  unsigned char data[];
+};
+#pragma pack(pop)
 
 class UdpVpnServer {
  public:
@@ -76,24 +83,26 @@ class UdpVpnServer {
             //std::cout << "Received Tunnel " << bytes_transferred << " bytes\n";
             std::array<unsigned char, buf_max_len>* buffer_data;
             if (tx_crypt_ctx_) {
+              UdpVpnEncryptedData* enc_data = (UdpVpnEncryptedData*)
+                  encrypted_tunnel_buffer_.data();
+
               // Generate a random initial vector
-              if (RAND_bytes(encrypted_tunnel_buffer_.data() +
-                             signature_len, symmetric_iv_len) != 1) {
+              if (RAND_bytes(enc_data->initial_vector, symmetric_iv_len) != 1) {
                 ERR_print_errors_fp(stderr);
                 throw CryptoException();
               }
+              // Encrypt using the random IV
               bytes_transferred = encrypt(
-                  tx_crypt_ctx_, tunnel_buffer_.data() + signature_len,
-                  tunnel_buffer_.data() + signature_len + symmetric_iv_len,
-                  bytes_transferred, encrypted_tunnel_buffer_.data());
-              // Generate a signature
-              sign_data(tunnel_buffer_.data(),
-                        tunnel_buffer_.data() + signature_len + symmetric_iv_len,
-                        bytes_transferred);
+                  tx_crypt_ctx_, enc_data->initial_vector,
+                  tunnel_buffer_.data(), bytes_transferred,
+                  enc_data->data);
+              // Generate a signature over the encrypted data
+              sign_data(enc_data->signature, enc_data->data, bytes_transferred);
               // Replace with the complete buffer
               buffer_data = &encrypted_tunnel_buffer_;
               bytes_transferred += signature_len + symmetric_iv_len;
             } else {
+              // Use the plaintext buffer
               buffer_data = &tunnel_buffer_;
             }
             send_socket_.async_send_to(
@@ -118,20 +127,24 @@ class UdpVpnServer {
             std::array<unsigned char, buf_max_len>* buffer_data;
             //std::cout << "Received UDP " << bytes_transferred << " bytes\n";
             if (rx_crypt_ctx_) {
-              bytes_transferred = bytes_transferred - signature_len + symmetric_iv_len;
+              const UdpVpnEncryptedData* enc_data = (UdpVpnEncryptedData*)
+                  udp_buffer_.data();
+              // Adjust to remove the signature and initial_vector
+              bytes_transferred = bytes_transferred - signature_len - symmetric_iv_len;
+              // Check that the signature is good
               if (!check_signature(
-                      udp_buffer_.data(),
-                      udp_buffer_.data() + signature_len + symmetric_iv_len,
-                      bytes_transferred)) {
-                // Failed the signature check - drop the data
+                      enc_data->signature, enc_data->data, bytes_transferred)) {
+                std::cout << "Failed the signature check - drop the data\n";
+                UdpReceive();
                 return;
               }
+              // Decrypt the data using the included initial vector
               bytes_transferred = decrypt(
-                  rx_crypt_ctx_, udp_buffer_.data() + signature_len,
-                  udp_buffer_.data() + signature_len + symmetric_iv_len,
-                  bytes_transferred, plaintext_udp_buffer_.data());
+                  rx_crypt_ctx_, enc_data->initial_vector,
+                  enc_data->data, bytes_transferred, plaintext_udp_buffer_.data());
               buffer_data = &plaintext_udp_buffer_;
             } else {
+              // Just use the plaintext buffer
               buffer_data = &udp_buffer_;
             }
             tunfd_.async_write_some(
@@ -201,7 +214,7 @@ class UdpVpnServer {
   }
 
   void sign_data(unsigned char* destination,
-                 unsigned char* source,
+                 const unsigned char* source,
                  int length) {
     HMAC_Init_ex(hmac_ctx_, signing_key_, signing_key_len, EVP_sha256(), NULL);
     HMAC_Update(hmac_ctx_, source, length);
@@ -209,8 +222,8 @@ class UdpVpnServer {
     HMAC_Final(hmac_ctx_, destination, &len);
   }
 
-  bool check_signature(unsigned char* data_signature,
-                       unsigned char* source,
+  bool check_signature(const unsigned char* data_signature,
+                       const unsigned char* source,
                        int length) {
     unsigned char signature[signature_len];
 
@@ -261,7 +274,7 @@ class UdpVpnServer {
     return ciphertext_len;
   }
 
-  int decrypt(EVP_CIPHER_CTX *ctx, unsigned char *iv,
+  int decrypt(EVP_CIPHER_CTX *ctx, const unsigned char *iv,
               const unsigned char *ciphertext,
               int ciphertext_len, unsigned char *plaintext)
   {
@@ -350,7 +363,6 @@ bool load_encryption_data(const std::string& key_file_path,
     return false;
   }
 
-  std::cout << "Loaded key data\n";
   return true;
 }
 
